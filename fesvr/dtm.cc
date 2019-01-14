@@ -21,20 +21,27 @@
   ((RV_X(x, 1, 10) << 21) | (RV_X(x, 11, 1) << 20) | (RV_X(x, 12, 8) << 12) | (RV_X(x, 20, 1) << 31))
 
 #define LOAD(xlen, dst, base, imm) \
-  (((xlen) == 64 ? 0x00003003 : 0x00002003) \
+  (((xlen) == 64 ? MATCH_LD : MATCH_LW) \
    | ((dst) << 7) | ((base) << 15) | (uint32_t)ENCODE_ITYPE_IMM(imm))
 #define STORE(xlen, src, base, imm) \
-  (((xlen) == 64 ? 0x00003023 : 0x00002023) \
+  (((xlen) == 64 ? MATCH_SD : MATCH_SW) \
    | ((src) << 20) | ((base) << 15) | (uint32_t)ENCODE_STYPE_IMM(imm))
 #define JUMP(there, here) (0x6f | (uint32_t)ENCODE_UJTYPE_IMM((there) - (here)))
-#define BNE(r1, r2, there, here) (0x1063 | ((r1) << 15) | ((r2) << 20) | (uint32_t)ENCODE_SBTYPE_IMM((there) - (here)))
-#define ADDI(dst, src, imm) (0x13 | ((dst) << 7) | ((src) << 15) | (uint32_t)ENCODE_ITYPE_IMM(imm))
-#define SRL(dst, src, sh) (0x5033 | ((dst) << 7) | ((src) << 15) | ((sh) << 20))
-#define FENCE_I 0x100f
-#define EBREAK  0x00100073
+#define BNE(r1, r2, there, here) (MATCH_BNE | ((r1) << 15) | ((r2) << 20) | (uint32_t)ENCODE_SBTYPE_IMM((there) - (here)))
+#define ADDI(dst, src, imm) (MATCH_ADDI | ((dst) << 7) | ((src) << 15) | (uint32_t)ENCODE_ITYPE_IMM(imm))
+#define ANDI(dst, src, imm) (MATCH_ANDI | ((dst) << 7) | ((src) << 15) | (uint32_t)ENCODE_ITYPE_IMM(imm))
+#define SLLI(dst, src, shamt) \
+  (MATCH_SLLI | ((dst) << 7) | ((src) << 15) | (ENCODE_ITYPE_IMM(((xlen) == 64 ? 0x3F : 0x1F) & shamt)))
+#define SRLI(dst, src, shamt) \
+  (MATCH_SRLI | ((dst) << 7) | ((src) << 15) | (ENCODE_ITYPE_IMM(((xlen) == 64 ? 0x3F : 0x1F) & shamt)))
+#define AUIPC(dst, imm) (MATCH_AUIPC | ((dst) << 7) | (uint32_t)ENCODE_UTYPE_IMM(imm))
+#define SRL(dst, src, sh) (MATCH_SRL | ((dst) << 7) | ((src) << 15) | ((sh) << 20))
+#define FENCE_I MATCH_FENCE_I
+#define EBREAK  MATCH_EBREAK
 #define X0 0
 #define S0 8
 #define S1 9
+#define A0 10
 
 #define AC_AR_REGNO(x) ((0x1000 | x) << AC_ACCESS_REGISTER_REGNO_OFFSET)
 #define AC_AR_SIZE(x)  (((x == 128)? 4 : (x == 64 ? 3 : 2)) << AC_ACCESS_REGISTER_SIZE_OFFSET)
@@ -89,10 +96,10 @@ int dtm_t::enumerate_harts() {
   while(1) {
     select_hart(hartsel);
     dmstatus = read(DMI_DMSTATUS);
-    if (get_field(dmstatus, DMI_DMSTATUS_ANYNONEXISTENT)) { 
+    if (get_field(dmstatus, DMI_DMSTATUS_ANYNONEXISTENT)) {
       break;
     }
-    hartsel++; 
+    hartsel++;
   }
   return hartsel;
 }
@@ -166,7 +173,7 @@ void dtm_t::restore_reg(unsigned regno, uint64_t val)
     AC_ACCESS_REGISTER_WRITE |
     AC_AR_SIZE(xlen) |
     AC_AR_REGNO(regno);
-  
+
   RUN_AC_OR_DIE(command, 0, 0, data, xlen / (8*4));
 
 }
@@ -174,10 +181,10 @@ void dtm_t::restore_reg(unsigned regno, uint64_t val)
 uint32_t dtm_t::run_abstract_command(uint32_t command,
                                      const uint32_t program[], size_t program_n,
                                      uint32_t data[], size_t data_n)
-{ 
+{
   assert(program_n <= ram_words);
   assert(data_n    <= data_words);
-  
+
   for (size_t i = 0; i < program_n; i++) {
     write(DMI_PROGBUF0 + i, program[i]);
   }
@@ -188,9 +195,9 @@ uint32_t dtm_t::run_abstract_command(uint32_t command,
       write(DMI_DATA0 + i, data[i]);
     }
   }
-  
+
   write(DMI_COMMAND, command);
-  
+
   // Wait for not busy and then check for error.
   uint32_t abstractcs;
   do {
@@ -203,7 +210,7 @@ uint32_t dtm_t::run_abstract_command(uint32_t command,
       data[i] = read(DMI_DATA0 + i);
     }
   }
-  
+
   return get_field(abstractcs, DMI_ABSTRACTCS_CMDERR);
 
 }
@@ -224,7 +231,7 @@ void dtm_t::read_chunk(uint64_t taddr, size_t len, void* dst)
 
   uint64_t s0 = save_reg(S0);
   uint64_t s1 = save_reg(S1);
-  
+
   prog[0] = LOAD(xlen, S1, S0, 0);
   prog[1] = ADDI(S0, S0, xlen/8);
   prog[2] = EBREAK;
@@ -239,7 +246,7 @@ void dtm_t::read_chunk(uint64_t taddr, size_t len, void* dst)
   uint32_t command = AC_ACCESS_REGISTER_TRANSFER |
     AC_ACCESS_REGISTER_WRITE |
     AC_ACCESS_REGISTER_POSTEXEC |
-    AC_AR_SIZE(xlen) | 
+    AC_AR_SIZE(xlen) |
     AC_AR_REGNO(S0);
 
   RUN_AC_OR_DIE(command, prog, 3, data, xlen/(4*8));
@@ -252,7 +259,7 @@ void dtm_t::read_chunk(uint64_t taddr, size_t len, void* dst)
     if ((i + 1) < (len * 8 / xlen)) {
       command |= AC_ACCESS_REGISTER_POSTEXEC;
     }
-    
+
     RUN_AC_OR_DIE(command, 0, 0, data, xlen/(4*8));
 
     memcpy(curr, data, xlen/8);
@@ -262,12 +269,12 @@ void dtm_t::read_chunk(uint64_t taddr, size_t len, void* dst)
   restore_reg(S0, s0);
   restore_reg(S1, s1);
 
-  resume(current_hart); 
+  resume(current_hart);
 
 }
 
 void dtm_t::write_chunk(uint64_t taddr, size_t len, const void* src)
-{  
+{
   uint32_t prog[ram_words];
   uint32_t data[data_words];
 
@@ -277,23 +284,23 @@ void dtm_t::write_chunk(uint64_t taddr, size_t len, const void* src)
 
   uint64_t s0 = save_reg(S0);
   uint64_t s1 = save_reg(S1);
-  
+
   prog[0] = STORE(xlen, S1, S0, 0);
   prog[1] = ADDI(S0, S0, xlen/8);
   prog[2] = EBREAK;
-  
+
   data[0] = (uint32_t) taddr;
   if (xlen > 32) {
     data[1] = (uint32_t) (taddr >> 32);
   }
 
   // Write the program (not used yet).
-  // Write s0 with the address. 
+  // Write s0 with the address.
   uint32_t command = AC_ACCESS_REGISTER_TRANSFER |
     AC_ACCESS_REGISTER_WRITE |
     AC_AR_SIZE(xlen) |
     AC_AR_REGNO(S0);
-  
+
   RUN_AC_OR_DIE(command, prog, 3, data, xlen/(4*8));
 
   // Use Autoexec for more than one word of transfer.
@@ -302,10 +309,10 @@ void dtm_t::write_chunk(uint64_t taddr, size_t len, const void* src)
   // Each time we write XLEN bits.
   memcpy(data, curr, xlen/8);
   curr += xlen/8;
-  
+
   command = AC_ACCESS_REGISTER_TRANSFER |
     AC_ACCESS_REGISTER_POSTEXEC |
-    AC_ACCESS_REGISTER_WRITE | 
+    AC_ACCESS_REGISTER_WRITE |
     AC_AR_SIZE(xlen) |
     AC_AR_REGNO(S1);
 
@@ -322,7 +329,7 @@ void dtm_t::write_chunk(uint64_t taddr, size_t len, const void* src)
       write(DMI_DATA0 + 1, data[1]);
     }
     write(DMI_DATA0, data[0]); //Triggers a command w/ autoexec.
-    
+
     do {
       abstractcs = read(DMI_ABSTRACTCS);
     } while (abstractcs & DMI_ABSTRACTCS_BUSY);
@@ -333,7 +340,7 @@ void dtm_t::write_chunk(uint64_t taddr, size_t len, const void* src)
   if ((len * 8 / xlen) > 1) {
     write(DMI_ABSTRACTAUTO, 0);
   }
-  
+
   restore_reg(S0, s0);
   restore_reg(S1, s1);
   resume(current_hart);
@@ -365,7 +372,7 @@ void dtm_t::clear_chunk(uint64_t taddr, size_t len)
 {
   uint32_t prog[ram_words];
   uint32_t data[data_words];
-  
+
   halt(current_hart);
   uint64_t s0 = save_reg(S0);
   uint64_t s1 = save_reg(S1);
@@ -426,16 +433,19 @@ uint64_t dtm_t::modify_csr(unsigned which, uint64_t data, uint32_t type)
 {
   halt(current_hart);
 
-  // This code just uses DSCRATCH to save S0
-  // and data_base to do the transfer so we don't
-  // need to run more commands to save and restore
-  // S0.
+  uint64_t s0 = save_reg(S0);
+  uint64_t a0 = save_reg(A0);
+
   uint32_t prog[] = {
-    CSRRx(WRITE, S0, CSR_DSCRATCH, S0),
-    LOAD(xlen, S0, X0, data_base),
+    // get current pc
+    // chop off lower 12 bits to get offset in order
+    // to get platform dependent offset of DM
+    AUIPC(A0, 0),
+    SRLI(A0,A0,12),
+    SLLI(A0,A0,12),
+    LOAD(xlen, S0, A0, data_base),
     CSRRx(type, S0, which, S0),
-    STORE(xlen, S0, X0, data_base),
-    CSRRx(WRITE, S0, CSR_DSCRATCH, S0),
+    STORE(xlen, S0, A0, data_base),
     EBREAK
   };
 
@@ -443,24 +453,26 @@ uint64_t dtm_t::modify_csr(unsigned which, uint64_t data, uint32_t type)
   // ignore transfer bit, so use "store to X0" NOOP.
   // We sort of need this anyway because run_abstract_command
   // needs the DATA to be written so may as well use the WRITE flag.
-  
+
   uint32_t adata[] = {(uint32_t) data,
                       (uint32_t) (data >> 32)};
-  
+
   uint32_t command = AC_ACCESS_REGISTER_POSTEXEC |
     AC_ACCESS_REGISTER_TRANSFER |
     AC_ACCESS_REGISTER_WRITE |
     AC_AR_SIZE(xlen) |
     AC_AR_REGNO(X0);
-  
+
   RUN_AC_OR_DIE(command, prog, sizeof(prog) / sizeof(*prog), adata, xlen/(4*8));
-  
+
   uint64_t res = read(DMI_DATA0);//adata[0];
   if (xlen == 64)
     res |= read(DMI_DATA0 + 1);//((uint64_t) adata[1]) << 32;
-  
+
+  restore_reg(S0, s0);
+  restore_reg(A0, a0);
   resume(current_hart);
-  return res;  
+  return res;
 }
 
 size_t dtm_t::chunk_max_size()
@@ -477,7 +489,7 @@ uint32_t dtm_t::get_xlen()
   // the size of S0 so you can save it later, then do that.
   uint32_t command = AC_ACCESS_REGISTER_TRANSFER | AC_AR_REGNO(S0);
   uint32_t cmderr;
-  
+
   const uint32_t prog[] = {};
   uint32_t data[] = {};
 
@@ -499,7 +511,7 @@ uint32_t dtm_t::get_xlen()
   if (cmderr == 0){
     return 32;
   }
-  
+
   throw std::runtime_error("FESVR DTM can't determine XLEN. Aborting");
 }
 
@@ -520,7 +532,7 @@ void dtm_t::fence_i()
     AC_AR_REGNO(X0);
 
   RUN_AC_OR_DIE(command, prog, sizeof(prog)/sizeof(*prog), 0, 0);
-  
+
   resume(current_hart);
 
 }
@@ -543,7 +555,7 @@ void dtm_t::reset()
   // this will enforce that hart 0 handles them.
   select_hart(0);
   read(DMI_DMSTATUS);
-} 
+}
 
 void dtm_t::idle()
 {
@@ -572,7 +584,7 @@ void dtm_t::producer_thread()
 
   // Enable the debugger.
   write(DMI_DMCONTROL, DMI_DMCONTROL_DMACTIVE);
-  
+
   num_harts = enumerate_harts();
   halt(0);
   // Note: We don't support systems with heterogeneous XLEN.
